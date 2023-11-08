@@ -752,3 +752,62 @@ fn control_messages_match_libc() {
 
     assert_eq!(buf.bytes, libc_control_messages_bytes);
 }
+
+#[test]
+fn test_send_fds_unix_stream() {
+    use crate::os::fd::AsFd;
+
+    let (s1, s2) = or_panic!(UnixStream::pair());
+
+    {
+        let dir = tmpdir();
+        let tmpfile_path = dir.path().join("sock1");
+        let mut tmpfile = crate::fs::File::create(tmpfile_path).unwrap();
+
+        tmpfile.write(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(tmpfile.stream_position().unwrap(), 5);
+
+        let mut ancillary_buf = AncillaryDataBuf::new();
+        ancillary_buf.add_file_descriptors(&[tmpfile.as_fd()]);
+        let mut ancillary = ancillary_buf.to_ancillary_data();
+        MessageSender::new(&s1, b"\x00").ancillary_data(&mut ancillary).send().unwrap();
+
+        // Drop the `AncillaryData` (holding FDs), but preserve its backing
+        // storage (the `AncillaryDataBuf`). This allows `tmpfile` to be
+        // borrowed again.
+        drop(ancillary);
+
+        // Fun Unix trivia time!
+        //
+        // Some file descriptor properties are shared between all file
+        // descriptors (the userland identifier we call `RawFd`) that refer to
+        // the same file description (the kernel object representing an open
+        // file). In other words, an OwnedFd is like an `Arc` pointing into
+        // something in kernel land.
+        //
+        // One of the shared properties is the seek position, which is
+        // demonstrated here by writing to the File after its borrowed FD has
+        // been sent.
+        tmpfile.write(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(tmpfile.stream_position().unwrap(), 10);
+    }
+
+    {
+        let mut ancillary_buf = AncillaryDataBuf::with_capacity(100);
+        let mut ancillary = ancillary_buf.to_ancillary_data();
+        let mut buf = [0u8; 1];
+        MessageReceiver::new(&s2, &mut buf).ancillary_data(&mut ancillary).recv().unwrap();
+
+        let mut received_fds: Vec<_> = ancillary.received_fds().collect();
+        assert_eq!(received_fds.len(), 1);
+        let received_fd = received_fds.pop().unwrap();
+        let mut tmpfile = crate::fs::File::from(received_fd);
+
+        // The file descriptor was received successfully and can be used.
+        //
+        // Note how the stream position starts at 10, not 5!
+        assert_eq!(tmpfile.stream_position().unwrap(), 10);
+        tmpfile.write(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(tmpfile.stream_position().unwrap(), 15);
+    }
+}

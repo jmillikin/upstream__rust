@@ -82,10 +82,11 @@ impl Default for SendOptions {
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-pub struct MessageSender<'a, 'fd> {
+pub struct MessageSender<'a, 'b, S> {
     buf: SenderBuf<'a>,
+    socket: &'a S,
     options: SendOptions,
-    ancillary_data: Option<&'a mut AncillaryData<'a, 'fd>>,
+    ancillary_data: Option<&'a mut AncillaryData<'b, 'b>>,
 }
 
 #[derive(Copy, Clone)]
@@ -103,56 +104,55 @@ impl<'a> SenderBuf<'a> {
     }
 }
 
-impl<'a, 'fd> MessageSender<'a, 'fd> {
+impl<'a, 'b, S> MessageSender<'a, 'b, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn new(buf: &'a [u8]) -> MessageSender<'a, 'fd> {
+    pub fn new(socket: &'a S, buf: &'a [u8]) -> MessageSender<'a, 'b, S> {
         MessageSender {
             buf: SenderBuf::Buf([IoSlice::new(buf)]),
+            socket,
             options: SendOptions::new(),
             ancillary_data: None,
         }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn new_vectored(bufs: &'a [IoSlice<'a>]) -> MessageSender<'a, 'fd> {
+    pub fn new_vectored(socket: &'a S, bufs: &'a [IoSlice<'a>]) -> MessageSender<'a, 'b, S> {
         MessageSender {
             buf: SenderBuf::Bufs(bufs),
+            socket,
             options: SendOptions::new(),
             ancillary_data: None,
         }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn ancillary_data(
-        &mut self,
-        ancillary_data: &'a mut AncillaryData<'a, 'fd>,
-    ) -> &mut MessageSender<'a, 'fd> {
+    pub fn ancillary_data(&mut self, ancillary_data: &'a mut AncillaryData<'b, 'b>) -> &mut Self {
         self.ancillary_data = Some(ancillary_data);
         self
     }
+}
 
+impl<S: SendMessage> MessageSender<'_, '_, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn send<S: SendMessage>(&mut self, socket: &S) -> io::Result<usize> {
+    pub fn send(&mut self) -> io::Result<usize> {
         let mut ancillary_empty = AncillaryData::new(&mut []);
         let ancillary_data = match self.ancillary_data {
             Some(ref mut x) => x,
             None => &mut ancillary_empty,
         };
-        socket.send_message(self.buf.get(), ancillary_data, self.options)
+        self.socket.send_message(self.buf.get(), ancillary_data, self.options)
     }
+}
 
+impl<S: SendMessageTo> MessageSender<'_, '_, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn send_to<S: SendMessageTo>(
-        &mut self,
-        socket: &S,
-        addr: &S::SocketAddr,
-    ) -> io::Result<usize> {
+    pub fn send_to(&mut self, addr: &S::SocketAddr) -> io::Result<usize> {
         let mut ancillary_empty = AncillaryData::new(&mut []);
         let ancillary_data = match self.ancillary_data {
             Some(ref mut x) => x,
             None => &mut ancillary_empty,
         };
-        socket.send_message_to(addr, self.buf.get(), ancillary_data, self.options)
+        self.socket.send_message_to(addr, self.buf.get(), ancillary_data, self.options)
     }
 }
 
@@ -266,10 +266,11 @@ impl MessageFlags {
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-pub struct MessageReceiver<'a> {
+pub struct MessageReceiver<'a, 'b, S> {
     buf: ReceiverBuf<'a>,
+    socket: &'a S,
     options: RecvOptions,
-    ancillary_data: Option<&'a mut AncillaryData<'a, 'static>>,
+    ancillary_data: Option<&'a mut AncillaryData<'b, 'static>>,
 }
 
 enum ReceiverBuf<'a> {
@@ -286,23 +287,32 @@ impl<'a> ReceiverBuf<'a> {
     }
 }
 
-impl<'a> MessageReceiver<'a> {
+impl<'a, 'b, S> MessageReceiver<'a, 'b, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn new(buf: &'a mut [u8]) -> MessageReceiver<'a> {
+    pub fn new(socket: &'a S, buf: &'a mut [u8]) -> MessageReceiver<'a, 'b, S> {
         Self {
             buf: ReceiverBuf::Buf([IoSliceMut::new(buf)]),
+            socket,
             options: RecvOptions::new(),
             ancillary_data: None,
         }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn new_vectored(bufs: &'a mut [IoSliceMut<'a>]) -> MessageReceiver<'a> {
-        Self { buf: ReceiverBuf::Bufs(bufs), options: RecvOptions::new(), ancillary_data: None }
+    pub fn new_vectored(
+        socket: &'a S,
+        bufs: &'a mut [IoSliceMut<'a>],
+    ) -> MessageReceiver<'a, 'b, S> {
+        Self {
+            buf: ReceiverBuf::Bufs(bufs),
+            socket,
+            options: RecvOptions::new(),
+            ancillary_data: None,
+        }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn options(&mut self, options: RecvOptions) -> &mut MessageReceiver<'a> {
+    pub fn options(&mut self, options: RecvOptions) -> &mut Self {
         self.options = options;
         self
     }
@@ -310,32 +320,33 @@ impl<'a> MessageReceiver<'a> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn ancillary_data(
         &mut self,
-        ancillary_data: &'a mut AncillaryData<'a, 'static>,
-    ) -> &mut MessageReceiver<'a> {
+        ancillary_data: &'a mut AncillaryData<'b, 'static>,
+    ) -> &mut Self {
         self.ancillary_data = Some(ancillary_data);
         self
     }
+}
 
+impl<S: RecvMessage> MessageReceiver<'_, '_, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn recv<S: RecvMessage>(&mut self, socket: &S) -> io::Result<(usize, MessageFlags)> {
+    pub fn recv(&mut self) -> io::Result<(usize, MessageFlags)> {
         let mut ancillary_empty = AncillaryData::new(&mut []);
         let ancillary_data = match self.ancillary_data {
             Some(ref mut x) => x,
             None => &mut ancillary_empty,
         };
-        socket.recv_message(self.buf.get(), ancillary_data, self.options)
+        self.socket.recv_message(self.buf.get(), ancillary_data, self.options)
     }
+}
 
+impl<S: RecvMessageFrom> MessageReceiver<'_, '_, S> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn recv_from<S: RecvMessageFrom>(
-        &mut self,
-        socket: &S,
-    ) -> io::Result<(usize, MessageFlags, S::SocketAddr)> {
+    pub fn recv_from(&mut self) -> io::Result<(usize, MessageFlags, S::SocketAddr)> {
         let mut ancillary_empty = AncillaryData::new(&mut []);
         let ancillary_data = match self.ancillary_data {
             Some(ref mut x) => x,
             None => &mut ancillary_empty,
         };
-        socket.recv_message_from(self.buf.get(), ancillary_data, self.options)
+        self.socket.recv_message_from(self.buf.get(), ancillary_data, self.options)
     }
 }

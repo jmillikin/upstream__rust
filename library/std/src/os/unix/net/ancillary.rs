@@ -3,7 +3,7 @@
 use crate::collections::TryReserveError;
 use crate::ffi::c_int;
 use crate::mem::{size_of, MaybeUninit};
-use crate::os::unix::io::{BorrowedFd, OwnedFd, RawFd};
+use crate::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 // Wrapper around `libc::CMSG_LEN` to safely decouple from OS-specific ints.
 //
@@ -24,6 +24,8 @@ const fn CMSG_SPACE(len: usize) -> usize {
     let padding = (unsafe { libc::CMSG_SPACE(c_len as _) } as usize) - c_len;
     len + padding
 }
+
+const FD_SIZE: usize = size_of::<RawFd>();
 
 /// A socket control message with borrowed data.
 ///
@@ -293,32 +295,54 @@ impl<'a> Iterator for ControlMessagesIter<'a> {
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 pub struct AncillaryData<'a, 'fd> {
-    buf: &'a (),
-    fds: &'fd (),
+    cmsgs_buf: &'a mut [MaybeUninit<u8>],
+    cmsgs_len: usize,
+    cmsgs_buf_fully_initialized: bool,
+    scm_rights_received: bool,
+    scm_rights_max_len: Option<usize>,
+    borrowed_fds: core::marker::PhantomData<[BorrowedFd<'fd>]>,
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 pub struct AncillaryDataNoCapacity {
-    p: (),
+    _p: (),
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 impl Drop for AncillaryData<'_, '_> {
     fn drop(&mut self) {
-        todo!()
+        drop(self.received_fds())
     }
 }
 
 impl<'a, 'fd> AncillaryData<'a, 'fd> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn new(control_messages_buf: &'a mut [MaybeUninit<u8>]) -> AncillaryData<'a, 'fd> {
-        todo!()
+        let cmsgs_buf_fully_initialized = control_messages_buf.is_empty();
+        AncillaryData {
+            cmsgs_buf: control_messages_buf,
+            cmsgs_len: 0,
+            cmsgs_buf_fully_initialized,
+            scm_rights_received: false,
+            scm_rights_max_len: None,
+            borrowed_fds: core::marker::PhantomData,
+        }
+    }
+
+    fn cmsgs_buf(&self) -> &[u8] {
+        let init_part = &self.cmsgs_buf[..self.cmsgs_len];
+        unsafe { MaybeUninit::slice_assume_init_ref(init_part) }
+    }
+
+    fn cmsgs_buf_mut(&mut self) -> &mut [u8] {
+        let init_part = &mut self.cmsgs_buf[..self.cmsgs_len];
+        unsafe { MaybeUninit::slice_assume_init_mut(init_part) }
     }
 
     // returns initialized portion of `control_messages_buf`.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn control_messages(&self) -> &ControlMessages {
-        todo!()
+        ControlMessages::from_bytes(self.cmsgs_buf())
     }
 
     // copy a control message into the ancillary data; error on out-of-capacity.
@@ -327,7 +351,21 @@ impl<'a, 'fd> AncillaryData<'a, 'fd> {
         &mut self,
         control_message: impl Into<ControlMessage<'b>>,
     ) -> Result<(), AncillaryDataNoCapacity> {
-        todo!()
+        let cmsg = control_message.into();
+        self.add_cmsg(&cmsg)
+    }
+
+    fn add_cmsg(&mut self, cmsg: &ControlMessage<'_>) -> Result<(), AncillaryDataNoCapacity> {
+        let cmsg_len = cmsg.cmsg_space();
+        if self.cmsgs_len + cmsg_len > self.cmsgs_buf.len() {
+            return Err(AncillaryDataNoCapacity { _p: () });
+        }
+
+        let (_, spare_capacity) = self.cmsgs_buf.split_at_mut(self.cmsgs_len);
+        let copied = cmsg.copy_to_slice(&mut spare_capacity[..cmsg_len]).len();
+        assert_eq!(cmsg_len, copied);
+        self.cmsgs_len += cmsg_len;
+        Ok(())
     }
 
     // Add an `SCM_RIGHTS` control message with given borrowed FDs.
@@ -336,40 +374,138 @@ impl<'a, 'fd> AncillaryData<'a, 'fd> {
         &mut self,
         borrowed_fds: &[BorrowedFd<'fd>],
     ) -> Result<(), AncillaryDataNoCapacity> {
-        todo!()
+        let data_ptr = borrowed_fds.as_ptr().cast::<u8>();
+        let data_len = borrowed_fds.len() * size_of::<RawFd>();
+        let data = unsafe { crate::slice::from_raw_parts(data_ptr, data_len) };
+        let cmsg = ControlMessage::new(libc::SOL_SOCKET, libc::SCM_RIGHTS, data);
+        self.add_cmsg(&cmsg)
     }
 
     // Transfers ownership of received FDs to the iterator.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn received_fds(&mut self) -> AncillaryDataReceivedFds<'_> {
-        todo!()
+        if !self.scm_rights_received {
+            return AncillaryDataReceivedFds { buf: None };
+        }
+
+        assert!(self.scm_rights_max_len.is_some());
+        let max_len = self.scm_rights_max_len.unwrap();
+        let cmsgs_buf_might_contain_fds = &mut self.cmsgs_buf_mut()[..max_len];
+        AncillaryDataReceivedFds { buf: Some(cmsgs_buf_might_contain_fds) }
     }
 
     // Obtain a mutable buffer usable as the `msg_control` pointer in a call
     // to `sendmsg()` or `recvmsg()`.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn control_messages_buf(&mut self) -> Option<&mut [u8]> {
-        todo!()
+        if self.cmsgs_buf.len() == 0 {
+            return None;
+        }
+
+        let (_, spare_capacity) = self.cmsgs_buf.split_at_mut(self.cmsgs_len);
+        // TODO: replace with https://github.com/rust-lang/rust/pull/117426
+        for byte in spare_capacity {
+            byte.write(0);
+        }
+        self.cmsgs_buf_fully_initialized = true;
+        self.cmsgs_len = 0;
+        self.scm_rights_received = false;
+        self.scm_rights_max_len = None;
+        let buf = unsafe { MaybeUninit::slice_assume_init_mut(self.cmsgs_buf) };
+        Some(buf)
     }
 
     // Update the control messages buffer length according to the result of
     // calling `sendmsg()` or `recvmsg()`.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn set_control_messages_len(&mut self, len: usize) {
-        todo!()
+        assert!(self.cmsgs_buf.len() >= len);
+        assert!(self.cmsgs_buf_fully_initialized);
+        if self.cmsgs_buf.len() > 0 {
+            self.cmsgs_len = len;
+            self.cmsgs_buf_fully_initialized = false;
+        }
+        self.scm_rights_max_len = Some(len);
     }
 
-    // Scan the control messages buffer for `SCM_RIGHTS` and take ownership of
-    // any file descriptors found within.
+    // Take ownership of any file descriptors in the control messages buffer.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub unsafe fn take_ownership_of_scm_rights(&mut self) {
-        todo!()
+        assert!(self.scm_rights_max_len.is_some());
+        self.scm_rights_received = true;
     }
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 pub struct AncillaryDataReceivedFds<'a> {
-    buf: &'a mut [u8],
+    buf: Option<&'a mut [u8]>,
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl Drop for AncillaryDataReceivedFds<'_> {
+    fn drop(&mut self) {
+        while let Some(_) = self.next() {}
+    }
+}
+
+impl AncillaryDataReceivedFds<'_> {
+    fn advance_to_next_scm_rights(mut buf: &mut [u8]) -> Option<(&mut [u8], usize, usize)> {
+        loop {
+            let cmsg = ControlMessagesIter { bytes: buf }.next()?;
+            let cmsg_size = cmsg.cmsg_space();
+            let data_len = cmsg.data().len();
+            if Self::is_scm_rights(&cmsg) && data_len > 0 {
+                return Some((buf, cmsg_size, data_len));
+            }
+            buf = &mut buf[cmsg_size..];
+        }
+    }
+
+    fn take_next_fd(mut buf: &mut [u8]) -> Option<(&mut [u8], OwnedFd)> {
+        loop {
+            let cmsg_space;
+            let cmsg_data_len;
+            (buf, cmsg_space, cmsg_data_len) = Self::advance_to_next_scm_rights(buf)?;
+
+            // If an owned FD can be found in the current `SCM_RIGHTS`, take
+            // ownership and return it. Otherwise, advance and look for any
+            // additional `SCM_RIGHTS` that might have been received (for
+            // platforms that don't coalesce them).
+            let scm_rights =
+                &mut buf[size_of::<libc::cmsghdr>()..size_of::<libc::cmsghdr>() + cmsg_data_len];
+            let scm_rights_fds = &mut scm_rights[..];
+
+            let Some(fd_buf) = Self::next_owned_fd(scm_rights_fds) else {
+                buf = &mut buf[cmsg_space..];
+                continue;
+            };
+
+            let raw_fd = RawFd::from_ne_bytes(*fd_buf);
+            let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+            let mark_as_taken: RawFd = -1;
+            fd_buf.clone_from_slice(&mark_as_taken.to_ne_bytes());
+            return Some((buf, owned_fd));
+        }
+    }
+
+    fn is_scm_rights(cmsg: &ControlMessage<'_>) -> bool {
+        cmsg.cmsg_level == libc::SOL_SOCKET && cmsg.cmsg_type == libc::SCM_RIGHTS
+    }
+
+    fn next_owned_fd(mut data: &mut [u8]) -> Option<&mut [u8; FD_SIZE]> {
+        loop {
+            if FD_SIZE > data.len() {
+                // Don't try to inspect a fragmentary FD in a truncated message.
+                return None;
+            }
+            let chunk_slice;
+            (chunk_slice, data) = data.split_at_mut(FD_SIZE);
+            let chunk: &mut [u8; FD_SIZE] = chunk_slice.try_into().unwrap();
+            if RawFd::from_ne_bytes(*chunk) != -1 {
+                return Some(chunk);
+            }
+        }
+    }
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
@@ -377,53 +513,87 @@ impl<'a> Iterator for AncillaryDataReceivedFds<'a> {
     type Item = OwnedFd;
 
     fn next(&mut self) -> Option<OwnedFd> {
-        todo!()
+        let buf = self.buf.take()?;
+        let (new_buf, next_fd) = Self::take_next_fd(buf)?;
+        self.buf = Some(new_buf);
+        Some(next_fd)
     }
 }
 
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 pub struct AncillaryDataBuf<'fd> {
+    cmsgs_buf: Vec<u8>,
     borrowed_fds: core::marker::PhantomData<[BorrowedFd<'fd>]>,
 }
 
 impl<'fd> AncillaryDataBuf<'fd> {
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn new<'a>() -> AncillaryDataBuf<'a> {
-        todo!()
+    pub fn new() -> AncillaryDataBuf<'fd> {
+        AncillaryDataBuf { cmsgs_buf: Vec::new(), borrowed_fds: core::marker::PhantomData }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn with_capacity<'a>(capacity: usize) -> AncillaryDataBuf<'a> {
-        todo!()
+    pub fn with_capacity(capacity: usize) -> AncillaryDataBuf<'fd> {
+        AncillaryDataBuf {
+            cmsgs_buf: Vec::with_capacity(capacity),
+            borrowed_fds: core::marker::PhantomData,
+        }
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn capacity(&self) -> usize {
-        todo!()
+        self.cmsgs_buf.capacity()
     }
 
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn control_messages(&self) -> &ControlMessages {
-        todo!()
+        ControlMessages::from_bytes(&self.cmsgs_buf)
     }
 
     // copy a control message into the ancillary data; panic on alloc failure.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn add_control_message<'a>(&mut self, control_message: impl Into<ControlMessage<'a>>) {
-        todo!()
+        self.add_cmsg(&control_message.into());
+    }
+
+    fn add_cmsg(&mut self, cmsg: &ControlMessage<'_>) {
+        let cmsg_len = cmsg.cmsg_space();
+        let cmsgs_len = self.cmsgs_buf.len();
+
+        self.cmsgs_buf.reserve(cmsg_len);
+        let spare_capacity = self.cmsgs_buf.spare_capacity_mut();
+        let copied = cmsg.copy_to_slice(&mut spare_capacity[..cmsg_len]).len();
+        assert_eq!(cmsg_len, copied);
+        unsafe {
+            self.cmsgs_buf.set_len(cmsgs_len + cmsg_len);
+        }
     }
 
     // Add an `SCM_RIGHTS` control message with given borrowed FDs; panic on
     // alloc failure.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn add_file_descriptors(&mut self, borrowed_fds: &[BorrowedFd<'fd>]) {
-        todo!()
+        let data_ptr = borrowed_fds.as_ptr().cast::<u8>();
+        let data_len = borrowed_fds.len() * size_of::<RawFd>();
+        let data = unsafe { crate::slice::from_raw_parts(data_ptr, data_len) };
+        let cmsg = ControlMessage::new(libc::SOL_SOCKET, libc::SCM_RIGHTS, data);
+        self.add_cmsg(&cmsg);
     }
 
     // Used to obtain `AncillaryData` for passing to send/recv calls.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn to_ancillary_data(&mut self) -> AncillaryData<'_, 'fd> {
-        todo!()
+        // Transfer ownership of control messages into the `AncillaryData`.
+        let cmsgs_len = self.cmsgs_buf.len();
+        self.cmsgs_buf.clear();
+        AncillaryData {
+            cmsgs_buf: self.cmsgs_buf.spare_capacity_mut(),
+            cmsgs_len: cmsgs_len,
+            cmsgs_buf_fully_initialized: false,
+            scm_rights_received: false,
+            scm_rights_max_len: None,
+            borrowed_fds: core::marker::PhantomData,
+        }
     }
 
     // Clears the control message buffer, without affecting capacity.
@@ -433,31 +603,31 @@ impl<'fd> AncillaryDataBuf<'fd> {
     // are no outstanding `AncillaryData`s and thus no received FDs.
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn clear(&mut self) {
-        todo!()
+        self.cmsgs_buf.clear();
     }
 
     // as in Vec
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn reserve(&mut self, capacity: usize) {
-        todo!()
+        self.cmsgs_buf.reserve(capacity);
     }
 
     // as in Vec
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn reserve_exact(&mut self, capacity: usize) {
-        todo!()
+        self.cmsgs_buf.reserve_exact(capacity);
     }
 
     // as in Vec
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn try_reserve(&mut self, capacity: usize) -> Result<(), TryReserveError> {
-        todo!()
+        self.cmsgs_buf.try_reserve(capacity)
     }
 
     // as in Vec
     #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
     pub fn try_reserve_exact(&mut self, capacity: usize) -> Result<(), TryReserveError> {
-        todo!()
+        self.cmsgs_buf.try_reserve_exact(capacity)
     }
 }
 
@@ -467,7 +637,9 @@ impl<'a> Extend<ControlMessage<'a>> for AncillaryDataBuf<'_> {
     where
         I: core::iter::IntoIterator<Item = ControlMessage<'a>>,
     {
-        todo!()
+        for cmsg in iter {
+            self.add_cmsg(&cmsg);
+        }
     }
 }
 
@@ -477,6 +649,8 @@ impl<'a> Extend<&'a ControlMessage<'a>> for AncillaryDataBuf<'_> {
     where
         I: core::iter::IntoIterator<Item = &'a ControlMessage<'a>>,
     {
-        todo!()
+        for cmsg in iter {
+            self.add_cmsg(cmsg);
+        }
     }
 }
