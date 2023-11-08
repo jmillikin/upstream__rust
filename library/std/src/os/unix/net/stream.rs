@@ -1,3 +1,5 @@
+use super::ancillary::AncillaryData;
+use super::message;
 use super::{sockaddr_un, SocketAddr};
 use crate::fmt;
 use crate::io::{self, IoSlice, IoSliceMut};
@@ -620,5 +622,50 @@ impl AsInner<Socket> for UnixStream {
     #[inline]
     fn as_inner(&self) -> &Socket {
         &self.0
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl message::SendMessage for UnixStream {
+    fn send_message(
+        &self,
+        bufs: &[io::IoSlice<'_>],
+        ancillary_data: &mut AncillaryData<'_, '_>,
+        options: message::SendOptions,
+    ) -> io::Result<usize> {
+        let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+        msg.msg_iov = bufs.as_ptr().cast_mut().cast();
+        msg.msg_iovlen = bufs.len() as _;
+        if let Some(ancillary_buf) = ancillary_data.control_messages_buf() {
+            msg.msg_control = ancillary_buf.as_mut_ptr().cast();
+            msg.msg_controllen = ancillary_buf.len();
+        }
+        let size = self.0.send_msg(&mut msg, options.as_sendmsg_flags())?;
+        ancillary_data.set_control_messages_len(msg.msg_controllen);
+        Ok(size)
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl message::RecvMessage for UnixStream {
+    fn recv_message(
+        &self,
+        bufs: &mut [io::IoSliceMut<'_>],
+        ancillary_data: &mut AncillaryData<'_, '_>,
+        options: message::RecvOptions,
+    ) -> io::Result<(usize, message::MessageFlags)> {
+        let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
+        msg.msg_iov = bufs.as_mut_ptr().cast();
+        msg.msg_iovlen = bufs.len() as _;
+        if let Some(ancillary_buf) = ancillary_data.control_messages_buf() {
+            msg.msg_control = ancillary_buf.as_mut_ptr().cast();
+            msg.msg_controllen = ancillary_buf.len();
+        }
+        let size = self.0.recv_msg(&mut msg, options.as_recvmsg_flags())?;
+        ancillary_data.set_control_messages_len(msg.msg_controllen);
+        unsafe {
+            ancillary_data.take_ownership_of_scm_rights();
+        };
+        Ok((size, message::MessageFlags::from_raw(msg.msg_flags)))
     }
 }

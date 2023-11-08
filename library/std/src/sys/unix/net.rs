@@ -327,9 +327,8 @@ impl Socket {
         self.recv_from_with_flags(buf, 0)
     }
 
-    #[allow(dead_code)]
-    pub fn recv_msg(&self, msg: &mut libc::msghdr) -> io::Result<usize> {
-        let n = cvt(unsafe { libc::recvmsg(self.as_raw_fd(), msg, libc::MSG_CMSG_CLOEXEC) })?;
+    pub fn recv_msg(&self, msg: &mut libc::msghdr, flags: c_int) -> io::Result<usize> {
+        let n = cvt(unsafe { libc::recvmsg(self.as_raw_fd(), msg, flags) })?;
         Ok(n as usize)
     }
 
@@ -350,9 +349,8 @@ impl Socket {
         self.0.is_write_vectored()
     }
 
-    #[allow(dead_code)]
-    pub fn send_msg(&self, msg: &mut libc::msghdr) -> io::Result<usize> {
-        let n = cvt(unsafe { libc::sendmsg(self.as_raw_fd(), msg, 0) })?;
+    pub fn send_msg(&self, msg: &mut libc::msghdr, flags: c_int) -> io::Result<usize> {
+        let n = cvt(unsafe { libc::sendmsg(self.as_raw_fd(), msg, flags) })?;
         Ok(n as usize)
     }
 

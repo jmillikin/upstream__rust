@@ -1,5 +1,9 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
+use crate::collections::TryReserveError;
 use crate::ffi::c_int;
 use crate::mem::{size_of, MaybeUninit};
+use crate::os::unix::io::{BorrowedFd, OwnedFd, RawFd};
 
 // Wrapper around `libc::CMSG_LEN` to safely decouple from OS-specific ints.
 //
@@ -93,7 +97,6 @@ impl ControlMessage<'_> {
         CMSG_SPACE(self.data.len())
     }
 
-    #[allow(dead_code)] // currently the only use is in the test suite
     pub(super) fn copy_to_slice<'a>(&self, dst: &'a mut [MaybeUninit<u8>]) -> &'a [u8] {
         assert_eq!(dst.len(), self.cmsg_space());
 
@@ -285,5 +288,195 @@ impl<'a> Iterator for ControlMessagesIter<'a> {
             cmsg_type: hdr.cmsg_type,
             data: cmsg_data,
         })
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+pub struct AncillaryData<'a, 'fd> {
+    buf: &'a (),
+    fds: &'fd (),
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+pub struct AncillaryDataNoCapacity {
+    p: (),
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl Drop for AncillaryData<'_, '_> {
+    fn drop(&mut self) {
+        todo!()
+    }
+}
+
+impl<'a, 'fd> AncillaryData<'a, 'fd> {
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn new(control_messages_buf: &'a mut [MaybeUninit<u8>]) -> AncillaryData<'a, 'fd> {
+        todo!()
+    }
+
+    // returns initialized portion of `control_messages_buf`.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn control_messages(&self) -> &ControlMessages {
+        todo!()
+    }
+
+    // copy a control message into the ancillary data; error on out-of-capacity.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn add_control_message<'b>(
+        &mut self,
+        control_message: impl Into<ControlMessage<'b>>,
+    ) -> Result<(), AncillaryDataNoCapacity> {
+        todo!()
+    }
+
+    // Add an `SCM_RIGHTS` control message with given borrowed FDs.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn add_file_descriptors(
+        &mut self,
+        borrowed_fds: &[BorrowedFd<'fd>],
+    ) -> Result<(), AncillaryDataNoCapacity> {
+        todo!()
+    }
+
+    // Transfers ownership of received FDs to the iterator.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn received_fds(&mut self) -> AncillaryDataReceivedFds<'_> {
+        todo!()
+    }
+
+    // Obtain a mutable buffer usable as the `msg_control` pointer in a call
+    // to `sendmsg()` or `recvmsg()`.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn control_messages_buf(&mut self) -> Option<&mut [u8]> {
+        todo!()
+    }
+
+    // Update the control messages buffer length according to the result of
+    // calling `sendmsg()` or `recvmsg()`.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn set_control_messages_len(&mut self, len: usize) {
+        todo!()
+    }
+
+    // Scan the control messages buffer for `SCM_RIGHTS` and take ownership of
+    // any file descriptors found within.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub unsafe fn take_ownership_of_scm_rights(&mut self) {
+        todo!()
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+pub struct AncillaryDataReceivedFds<'a> {
+    buf: &'a mut [u8],
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl<'a> Iterator for AncillaryDataReceivedFds<'a> {
+    type Item = OwnedFd;
+
+    fn next(&mut self) -> Option<OwnedFd> {
+        todo!()
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+pub struct AncillaryDataBuf<'fd> {
+    borrowed_fds: core::marker::PhantomData<[BorrowedFd<'fd>]>,
+}
+
+impl<'fd> AncillaryDataBuf<'fd> {
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn new<'a>() -> AncillaryDataBuf<'a> {
+        todo!()
+    }
+
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn with_capacity<'a>(capacity: usize) -> AncillaryDataBuf<'a> {
+        todo!()
+    }
+
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn capacity(&self) -> usize {
+        todo!()
+    }
+
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn control_messages(&self) -> &ControlMessages {
+        todo!()
+    }
+
+    // copy a control message into the ancillary data; panic on alloc failure.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn add_control_message<'a>(&mut self, control_message: impl Into<ControlMessage<'a>>) {
+        todo!()
+    }
+
+    // Add an `SCM_RIGHTS` control message with given borrowed FDs; panic on
+    // alloc failure.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn add_file_descriptors(&mut self, borrowed_fds: &[BorrowedFd<'fd>]) {
+        todo!()
+    }
+
+    // Used to obtain `AncillaryData` for passing to send/recv calls.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn to_ancillary_data(&mut self) -> AncillaryData<'_, 'fd> {
+        todo!()
+    }
+
+    // Clears the control message buffer, without affecting capacity.
+    //
+    // This will not leak FDs because the `AncillaryData` type holds a mutable
+    // reference to the `AncillaryDataBuf`, so if `clear()` is called then there
+    // are no outstanding `AncillaryData`s and thus no received FDs.
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn clear(&mut self) {
+        todo!()
+    }
+
+    // as in Vec
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn reserve(&mut self, capacity: usize) {
+        todo!()
+    }
+
+    // as in Vec
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn reserve_exact(&mut self, capacity: usize) {
+        todo!()
+    }
+
+    // as in Vec
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn try_reserve(&mut self, capacity: usize) -> Result<(), TryReserveError> {
+        todo!()
+    }
+
+    // as in Vec
+    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+    pub fn try_reserve_exact(&mut self, capacity: usize) -> Result<(), TryReserveError> {
+        todo!()
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl<'a> Extend<ControlMessage<'a>> for AncillaryDataBuf<'_> {
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: core::iter::IntoIterator<Item = ControlMessage<'a>>,
+    {
+        todo!()
+    }
+}
+
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+impl<'a> Extend<&'a ControlMessage<'a>> for AncillaryDataBuf<'_> {
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: core::iter::IntoIterator<Item = &'a ControlMessage<'a>>,
+    {
+        todo!()
     }
 }

@@ -9,6 +9,7 @@ mod addr;
 mod ancillary;
 mod datagram;
 mod listener;
+mod message;
 mod stream;
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests;
@@ -21,5 +22,7 @@ pub use self::ancillary::*;
 pub use self::datagram::*;
 #[stable(feature = "unix_socket", since = "1.10.0")]
 pub use self::listener::*;
+#[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
+pub use self::message::*;
 #[stable(feature = "unix_socket", since = "1.10.0")]
 pub use self::stream::*;
