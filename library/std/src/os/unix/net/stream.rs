@@ -1,5 +1,3 @@
-#[cfg(any(doc, target_os = "android", target_os = "linux"))]
-use super::{recv_vectored_with_ancillary_from, send_vectored_with_ancillary_to, SocketAncillary};
 use super::{sockaddr_un, SocketAddr};
 use crate::fmt;
 use crate::io::{self, IoSlice, IoSliceMut};
@@ -494,96 +492,6 @@ impl UnixStream {
     #[unstable(feature = "unix_socket_peek", issue = "76923")]
     pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.peek(buf)
-    }
-
-    /// Receives data and ancillary data from socket.
-    ///
-    /// On success, returns the number of bytes read.
-    ///
-    /// # Examples
-    ///
-    #[cfg_attr(any(target_os = "android", target_os = "linux"), doc = "```no_run")]
-    #[cfg_attr(not(any(target_os = "android", target_os = "linux")), doc = "```ignore")]
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::{UnixStream, SocketAncillary, AncillaryData};
-    /// use std::io::IoSliceMut;
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let socket = UnixStream::connect("/tmp/sock")?;
-    ///     let mut buf1 = [1; 8];
-    ///     let mut buf2 = [2; 16];
-    ///     let mut buf3 = [3; 8];
-    ///     let mut bufs = &mut [
-    ///         IoSliceMut::new(&mut buf1),
-    ///         IoSliceMut::new(&mut buf2),
-    ///         IoSliceMut::new(&mut buf3),
-    ///     ][..];
-    ///     let mut fds = [0; 8];
-    ///     let mut ancillary_buffer = [0; 128];
-    ///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    ///     let size = socket.recv_vectored_with_ancillary(bufs, &mut ancillary)?;
-    ///     println!("received {size}");
-    ///     for ancillary_result in ancillary.messages() {
-    ///         if let AncillaryData::ScmRights(scm_rights) = ancillary_result.unwrap() {
-    ///             for fd in scm_rights {
-    ///                 println!("receive file descriptor: {fd}");
-    ///             }
-    ///         }
-    ///     }
-    ///     Ok(())
-    /// }
-    /// ```
-    #[cfg(any(doc, target_os = "android", target_os = "linux"))]
-    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn recv_vectored_with_ancillary(
-        &self,
-        bufs: &mut [IoSliceMut<'_>],
-        ancillary: &mut SocketAncillary<'_>,
-    ) -> io::Result<usize> {
-        let (count, _, _) = recv_vectored_with_ancillary_from(&self.0, bufs, ancillary)?;
-
-        Ok(count)
-    }
-
-    /// Sends data and ancillary data on the socket.
-    ///
-    /// On success, returns the number of bytes written.
-    ///
-    /// # Examples
-    ///
-    #[cfg_attr(any(target_os = "android", target_os = "linux"), doc = "```no_run")]
-    #[cfg_attr(not(any(target_os = "android", target_os = "linux")), doc = "```ignore")]
-    /// #![feature(unix_socket_ancillary_data)]
-    /// use std::os::unix::net::{UnixStream, SocketAncillary};
-    /// use std::io::IoSlice;
-    ///
-    /// fn main() -> std::io::Result<()> {
-    ///     let socket = UnixStream::connect("/tmp/sock")?;
-    ///     let buf1 = [1; 8];
-    ///     let buf2 = [2; 16];
-    ///     let buf3 = [3; 8];
-    ///     let bufs = &[
-    ///         IoSlice::new(&buf1),
-    ///         IoSlice::new(&buf2),
-    ///         IoSlice::new(&buf3),
-    ///     ][..];
-    ///     let fds = [0, 1, 2];
-    ///     let mut ancillary_buffer = [0; 128];
-    ///     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
-    ///     ancillary.add_fds(&fds[..]);
-    ///     socket.send_vectored_with_ancillary(bufs, &mut ancillary)
-    ///         .expect("send_vectored_with_ancillary function failed");
-    ///     Ok(())
-    /// }
-    /// ```
-    #[cfg(any(doc, target_os = "android", target_os = "linux"))]
-    #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
-    pub fn send_vectored_with_ancillary(
-        &self,
-        bufs: &[IoSlice<'_>],
-        ancillary: &mut SocketAncillary<'_>,
-    ) -> io::Result<usize> {
-        send_vectored_with_ancillary_to(&self.0, None, bufs, ancillary)
     }
 }
 

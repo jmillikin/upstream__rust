@@ -15,7 +15,6 @@ mod tests;
 
 #[stable(feature = "unix_socket", since = "1.10.0")]
 pub use self::addr::*;
-#[cfg(any(doc, target_os = "android", target_os = "linux"))]
 #[unstable(feature = "unix_socket_ancillary_data", issue = "76915")]
 pub use self::ancillary::*;
 #[stable(feature = "unix_socket", since = "1.10.0")]
